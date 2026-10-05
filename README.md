@@ -21,8 +21,11 @@ Simulated process scheduling system for my CS205 Operating Systems project. It r
 |3|Terminated|Completed or killed, cannot be resumed|
 |4|Blocked|Waiting for a predefined event|
 
+> `prog` is the test program. It takes a `file_name` and a number `n`, and writes to the file every second for `n` seconds.
+
 ## Commands
-- `run [program] [arguments] [Priority] [event@cycle]`: Start a program with a priority (e.g. `P2`). Optionally add an event like `E1@4` to block it after 4 seconds of running until `E1` is triggered
+- `run [program] [file_name] [n] [priority] [event@cycle]`: Start a program with a priority (e.g. `P2`). Optionally add an event like `E1@4` to block it after 4 seconds of running until `E1` is triggered
+    - `[file_name]` and `[n]` are the params for the test program (See above).
 - `stop [PID]`: Suspend a running process and dispatch the next highest priority ready job
 - `resume [PID]`: Move a stopped process back to ready. It doesn't preempt anything, just waits for a free slot
 - `kill [PID]`: Terminate a process and dispatch the next ready job if a slot frees up
@@ -46,8 +49,6 @@ gcc -o manager manager.c
 gcc -o out/prog tools/prog.c
 ./manager
 ```
-
-`prog` is the test program. It takes a file name and a number `n`, and writes to the file every second for `n` seconds.
 
 ## Example
 ```
