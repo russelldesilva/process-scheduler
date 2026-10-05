@@ -11,6 +11,7 @@ typedef struct Process {
     char *priority;
     char *event;
     struct Process *next;
+    struct Process *global_next;
 } Process;
 
 typedef struct P_Node_Queue {
@@ -19,7 +20,7 @@ typedef struct P_Node_Queue {
 } P_Node_Queue;
 
 // Global vars (process queues)
-P_Node_Queue *ready_queue, *running_queue, *blocked_queue;
+P_Node_Queue *all_queue, *ready_queue, *running_queue, *blocked_queue;
 
 int extract_args(char* args[], int num_args) {
     int idx = 0;
@@ -51,6 +52,24 @@ void append_to_queue(P_Node_Queue *queue, Process *process) {
     queue->size++;
 }
 
+// Same as append_to_queue, but links through global_next so a process can be
+// in all_queue and in one of the state queues at the same time.
+void append_to_global_queue(P_Node_Queue *queue, Process *process) {
+    process->global_next = NULL;
+
+    if (queue->head == NULL) {
+        queue->head = process;
+    } else {
+        Process *curr = queue->head;
+        while (curr->global_next != NULL) {
+            curr = curr->global_next;
+        }
+        curr->global_next = process;
+    }
+
+    queue->size++;
+}
+
 void assign_to_queue(Process *process, int PID) {
     if (running_queue->size < 3) {
         process->code = 0;
@@ -61,12 +80,21 @@ void assign_to_queue(Process *process, int PID) {
     }
 }
 
-void print_queue(P_Node_Queue *queue) {
+// void print_queue(P_Node_Queue *queue) {
+//     Process *curr = queue->head;
+//     printf("%-8s %-6s %s\n", "PID", "STATE", "PRIORITY");
+//     while (curr != NULL) {
+//         printf("%-8d %-6d %s\n", curr->PID, curr->code, curr->priority);
+//         curr = curr->next;
+//     }
+// }
+
+void print_global_queue(P_Node_Queue *queue) {
     Process *curr = queue->head;
     printf("%-8s %-6s %s\n", "PID", "STATE", "PRIORITY");
     while (curr != NULL) {
         printf("%-8d %-6d %s\n", curr->PID, curr->code, curr->priority);
-        curr = curr->next;
+        curr = curr->global_next;
     }
 }
 
@@ -80,6 +108,10 @@ int main(void) {
     const char EVENT_CMD[6] = "event";
     
     const int RUN_ARGS = 5;
+
+    all_queue = malloc(sizeof(P_Node_Queue));
+    all_queue->size = 0;
+    all_queue->head = NULL;
 
     ready_queue = malloc(sizeof(P_Node_Queue));
     ready_queue->size = 0;
@@ -130,10 +162,12 @@ int main(void) {
                 args[0] = "./out/prog";
 
                 char *prog_args[] = {args[0], args[1], args[2], NULL};
+
                 Process *new_process = malloc(sizeof(Process));
                 new_process->PID = ++PID;
-                new_process->priority = args[3];
-                new_process->event = args[4];
+                new_process->priority = strdup(args[3]);
+                new_process->event = strdup(args[4]);
+                append_to_global_queue(all_queue, new_process);
                 assign_to_queue(new_process, PID);
 
                 if (new_process->code == 0) {
@@ -152,9 +186,7 @@ int main(void) {
         } else if (strcmp(command, RESUME_CMD) == 0) {
         
         } else if (strcmp(command, LIST_CMD) == 0) {
-            print_queue(running_queue);
-            print_queue(ready_queue);
-            print_queue(blocked_queue);
+            print_global_queue(all_queue);
         } else if (strcmp(command, EXIT_CMD) == 0) {
 
         } else if (strcmp(command, EVENT_CMD) == 0) {
