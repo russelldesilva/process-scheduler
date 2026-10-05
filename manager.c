@@ -108,6 +108,11 @@ int main(void) {
     const char EVENT_CMD[6] = "event";
     
     const int RUN_ARGS = 5;
+    const int RUN_ARGS_MANDATORY = 4;
+    const int STOP_ARGS = 1;
+    const int RESUME_ARGS = 1;
+    const int KILL_ARGS = 1;
+    const int EVENT_ARGS = 1;
 
     all_queue = malloc(sizeof(P_Node_Queue));
     all_queue->size = 0;
@@ -154,8 +159,8 @@ int main(void) {
             // args[4] = <event>
             // args[5] = NULL
 
-            if (num_args < 3) {
-                printf("Usage: run prog <file_name> <n> [priority] [event]\n");
+            if (num_args < RUN_ARGS_MANDATORY) {
+                printf("Usage: run prog <file_name> <n> <priority> [event (optional)]\n");
             } else if (strcmp(args[0], "prog") != 0) {
                 printf("Invalid program. Use prog\n");
             } else {
@@ -180,17 +185,37 @@ int main(void) {
                 }
             }
         } else if (strcmp(command, STOP_CMD) == 0) {
-        
+            char *args[STOP_ARGS + 1];
+            int num_args = extract_args(args, STOP_ARGS);
+
+            if (num_args < STOP_ARGS) {
+                printf("Usage: stop <PID>\n");
+            }
         } else if (strcmp(command, KILL_CMD) == 0) {
-        
+            char *args[KILL_ARGS + 1];
+            int num_args = extract_args(args, KILL_ARGS);
+
+            if (num_args < KILL_ARGS) {
+                printf("Usage: kill <PID>\n");
+            }
         } else if (strcmp(command, RESUME_CMD) == 0) {
-        
+            char *args[RESUME_ARGS + 1];
+            int num_args = extract_args(args, RESUME_ARGS);
+
+            if (num_args < RESUME_ARGS) {
+                printf("Usage: resume <PID>\n");
+            }
         } else if (strcmp(command, LIST_CMD) == 0) {
             print_global_queue(all_queue);
         } else if (strcmp(command, EXIT_CMD) == 0) {
-
+            break;
         } else if (strcmp(command, EVENT_CMD) == 0) {
-        
+            char *args[EVENT_ARGS + 1];
+            int num_args = extract_args(args, EVENT_ARGS);        
+
+            if (num_args < EVENT_ARGS) {
+                printf("Usage: event <E1/E2/E3>\n");
+            }
         } else {
             printf("Invalid command\n");
         }
