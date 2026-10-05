@@ -166,6 +166,8 @@ int main(void) {
                 printf("Usage: run prog <file_name> <n> <priority> [event (optional)]\n");
             } else if (strcmp(args[0], "prog") != 0) {
                 printf("Invalid program. Use prog\n");
+
+                // TODO: data validation for priority and event
             } else {
                 args[0] = "./out/prog";
 
@@ -174,7 +176,14 @@ int main(void) {
                 Process *new_process = malloc(sizeof(Process));
                 new_process->PID = 0;
                 new_process->priority = strdup(args[3]);
-                new_process->event = strdup(args[4]);
+
+                // handle optional event arg
+                if (num_args == 5) {
+                    new_process->event = strdup(args[4]);
+                } else {
+                    new_process->event = NULL;
+                }
+
                 append_to_global_queue(all_queue, new_process);
                 assign_to_queue(new_process);
                 
