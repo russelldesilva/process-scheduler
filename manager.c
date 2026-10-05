@@ -6,7 +6,7 @@
 #include <unistd.h>
 
 typedef struct Process {
-    int PID;
+    pid_t PID;
     int code;
     char *priority;
     char *event;
@@ -70,7 +70,7 @@ void append_to_global_queue(P_Node_Queue *queue, Process *process) {
     queue->size++;
 }
 
-void assign_to_queue(Process *process, int PID) {
+void assign_to_queue(Process *process) {
     if (running_queue->size < 3) {
         process->code = 0;
         append_to_queue(running_queue, process);
@@ -93,7 +93,11 @@ void print_global_queue(P_Node_Queue *queue) {
     Process *curr = queue->head;
     printf("%-8s %-6s %s\n", "PID", "STATE", "PRIORITY");
     while (curr != NULL) {
-        printf("%-8d %-6d %s\n", curr->PID, curr->code, curr->priority);
+        if (curr->PID != 0) {
+            printf("%-8d %-6d %s\n", curr->PID, curr->code, curr->priority);
+        } else {
+            printf("%-8c %-6d %s\n", '-', curr->code, curr->priority); // print '-' when PID is 0 (i.e. process not started yet)
+        }
         curr = curr->global_next;
     }
 }
@@ -131,7 +135,6 @@ int main(void) {
     running_queue->head = NULL;
     
     char line[256];
-    int PID = 0;
     
     while (true) {
         printf("cs205$ ");
@@ -141,7 +144,7 @@ int main(void) {
             break;
         }
 
-        // replace \n with \0
+        // replace \n with \0 so strtok knows the end of the line
         line[strcspn(line, "\n")] = '\0';
 
         char *command = strtok(line, " ");
@@ -169,18 +172,20 @@ int main(void) {
                 char *prog_args[] = {args[0], args[1], args[2], NULL};
 
                 Process *new_process = malloc(sizeof(Process));
-                new_process->PID = ++PID;
+                new_process->PID = 0;
                 new_process->priority = strdup(args[3]);
                 new_process->event = strdup(args[4]);
                 append_to_global_queue(all_queue, new_process);
-                assign_to_queue(new_process, PID);
-
+                assign_to_queue(new_process);
+                
                 if (new_process->code == 0) {
                     pid_t pid = fork();
                     if (pid == 0) {
                         execv(args[0], prog_args);
                         perror("execv");    // only reached if exec failed
                         _exit(1);
+                    } else {
+                        new_process->PID = pid; // assign acutal PID to process object
                     }
                 }
             }
