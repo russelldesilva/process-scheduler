@@ -42,9 +42,9 @@ These are meant to simulate I/O or other blocking events that occur in the cours
 ## How to run
 Needs a Linux/Unix environment (WSL works fine).
 ```sh
-gcc -o scheduler scheduler.c
+gcc -o manager manager.c
 gcc -o out/prog tools/prog.c
-./scheduler
+./manager
 ```
 
 `prog` is the test program. It takes a file name and a number `n`, and writes to the file every second for `n` seconds.
