@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <regex.h>
 
 typedef struct Process {
     pid_t PID;
@@ -19,8 +20,12 @@ typedef struct P_Node_Queue {
     struct Process *head;
 } P_Node_Queue;
 
-// Global vars (process queues)
+// === Global vars ==== 
+// process queues
 P_Node_Queue *all_queue, *ready_queue, *running_queue, *blocked_queue;
+
+// regex comparators for priority and event args in run()
+regex_t priority_re, event_re;
 
 int extract_args(char* args[], int num_args) {
     int idx = 0;
@@ -103,6 +108,7 @@ void print_global_queue(P_Node_Queue *queue) {
 }
 
 int main(void) {
+    // names of commands
     const char RUN_CMD[4] = "run";
     const char STOP_CMD[5] = "stop";
     const char KILL_CMD[5] = "kill";
@@ -111,12 +117,17 @@ int main(void) {
     const char EXIT_CMD[5] = "exit";
     const char EVENT_CMD[6] = "event";
     
+    // number of args for each command
     const int RUN_ARGS = 5;
     const int RUN_ARGS_MANDATORY = 4;
     const int STOP_ARGS = 1;
     const int RESUME_ARGS = 1;
     const int KILL_ARGS = 1;
     const int EVENT_ARGS = 1;
+
+    // set regex comparators
+    regcomp(&priority_re, "^P[1-9][0-9]*$", REG_EXTENDED | REG_NOSUB);
+    regcomp(&event_re, "^E[1-3]@[1-9][0-9]*$", REG_EXTENDED | REG_NOSUB);
 
     all_queue = malloc(sizeof(P_Node_Queue));
     all_queue->size = 0;
@@ -166,9 +177,12 @@ int main(void) {
                 printf("Usage: run prog <file_name> <n> <priority> [event (optional)]\n");
             } else if (strcmp(args[0], "prog") != 0) {
                 printf("Invalid program. Use prog\n");
-
-                // TODO: data validation for priority and event
-            } else {
+            } else if (regexec(&priority_re, args[3], 0, NULL, 0) != 0) {
+                printf("Invalid priority. Priority must be in the form P1, P2, P3, ... Pn\n");
+            } else if (num_args == 5 && regexec(&event_re, args[4], 0, NULL, 0) != 0) {
+                printf("Invalid event. Event must be in the form E1/E2/E3@<time_till_event_start>\n");
+            }
+            else {
                 args[0] = "./out/prog";
 
                 char *prog_args[] = {args[0], args[1], args[2], NULL};
@@ -204,6 +218,8 @@ int main(void) {
 
             if (num_args < STOP_ARGS) {
                 printf("Usage: stop <PID>\n");
+            } else {
+                
             }
         } else if (strcmp(command, KILL_CMD) == 0) {
             char *args[KILL_ARGS + 1];
