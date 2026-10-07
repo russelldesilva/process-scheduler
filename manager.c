@@ -5,6 +5,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <regex.h>
+#include <signal.h>
 
 typedef struct Process {
     pid_t PID;
@@ -22,11 +23,18 @@ typedef struct P_Node_Queue {
 
 // === Global vars ==== 
 // process queues
+// all_queue contains all processes across all states, even those that are not in the other queues
 P_Node_Queue *all_queue, *ready_queue, *running_queue, *blocked_queue;
 
 // regex comparators for priority and event args in run()
 regex_t priority_re, event_re;
 
+// regex comparator for PID
+regex_t pid_re;
+
+// extracts all arguements into an array of strings
+// - args: the output array, num_args: the MAX number of arguements for a method
+// - returns number of args actually parsed
 int extract_args(char* args[], int num_args) {
     int idx = 0;
     char *arg;
@@ -41,6 +49,7 @@ int extract_args(char* args[], int num_args) {
     return idx;
 }
 
+// add a process to the end of a queue
 void append_to_queue(P_Node_Queue *queue, Process *process) {
     process->next = NULL;
 
@@ -75,6 +84,9 @@ void append_to_global_queue(P_Node_Queue *queue, Process *process) {
     queue->size++;
 }
 
+// assings a process to either running or ready queue
+// - will send to running queue only if there are free slots (max 3)
+// - otherwise send to ready queue
 void assign_to_queue(Process *process) {
     if (running_queue->size < 3) {
         process->code = 0;
@@ -83,6 +95,71 @@ void assign_to_queue(Process *process) {
         process->code = 1;
         append_to_queue(ready_queue, process);
     }
+}
+
+// finds a process by its pid, returns that process or NULL if not found
+Process *find_by_pid(P_Node_Queue *queue, pid_t pid) {
+    Process *curr = queue->head;
+
+    while (curr != NULL) {
+        if (curr->PID == pid) {
+            return curr;
+        }
+        curr = curr->global_next;
+    }
+
+    return NULL;
+}
+
+// Removes the process with the given PID from queue. Returns it, or NULL if not found.
+Process *remove_from_queue(P_Node_Queue *queue, pid_t pid) {
+    Process **curr = &queue->head;
+
+    while (*curr != NULL) {
+        if ((*curr)->PID == pid) {
+            Process *removed = *curr;
+            *curr = removed->next; 
+            removed->next = NULL;
+            queue->size--;
+            return removed;
+        }
+        curr = &(*curr)->next;
+    }
+    return NULL;
+}
+
+// sends a signal to OS process
+// pid: PID of process, signal: SIGSTOP, SIGKILL or SIGCONT
+int send_signal_to_process(pid_t pid, int signal) {
+    Process *process = find_by_pid(all_queue, pid);
+
+    if (process == NULL) {
+        printf("Invalid PID\n");
+        return -1;
+    }
+
+    if (signal == SIGSTOP && process->code != 0) {
+        printf("Unable to stop a process that is not in the running state (code: 0)\n");
+        return -1;
+    } else if (signal == SIGKILL && process->code == 3) {
+        printf("Unable to kill a process that has already terminated (code: 3)\n");
+        return -1;
+    } else if (signal == SIGCONT && process->code != 2) {
+        printf("Unable to resume a process that is not in the stopped state (code: 2)\n");
+        return -1;
+    }
+
+    int status = kill(pid, signal);
+    if (signal == SIGKILL) {
+        waitpid(pid, NULL, 0); // wait for child process to die first before garbage collection
+    }
+
+    if (status == -1) {
+        perror("Error sending signal to process");
+        return -1;
+    }
+
+    return 0;
 }
 
 // void print_queue(P_Node_Queue *queue) {
@@ -94,6 +171,7 @@ void assign_to_queue(Process *process) {
 //     }
 // }
 
+// prints all processes in the all_queue
 void print_global_queue(P_Node_Queue *queue) {
     Process *curr = queue->head;
     printf("%-8s %-6s %s\n", "PID", "STATE", "PRIORITY");
@@ -128,6 +206,7 @@ int main(void) {
     // set regex comparators
     regcomp(&priority_re, "^P[1-9][0-9]*$", REG_EXTENDED | REG_NOSUB);
     regcomp(&event_re, "^E[1-3]@[1-9][0-9]*$", REG_EXTENDED | REG_NOSUB);
+    regcomp(&pid_re, "^[1-9][0-9]{0,6}$", REG_EXTENDED | REG_NOSUB);
 
     all_queue = malloc(sizeof(P_Node_Queue));
     all_queue->size = 0;
@@ -145,12 +224,14 @@ int main(void) {
     running_queue->size = 0;
     running_queue->head = NULL;
     
+    // buffer for command input
     char line[256];
     
     while (true) {
         printf("cs205$ ");
         fflush(stdout);
 
+        // handle blank inputs
         if (fgets(line, sizeof line, stdin) == NULL) {
             break;
         }
@@ -158,6 +239,7 @@ int main(void) {
         // replace \n with \0 so strtok knows the end of the line
         line[strcspn(line, "\n")] = '\0';
 
+        // extract command (run, stop, kill, etc...)
         char *command = strtok(line, " ");
         if (command == NULL) {
             continue;
@@ -205,7 +287,7 @@ int main(void) {
                     pid_t pid = fork();
                     if (pid == 0) {
                         execv(args[0], prog_args);
-                        perror("execv");    // only reached if exec failed
+                        perror("Unable to execute program");    // only reached if exec failed
                         _exit(1);
                     } else {
                         new_process->PID = pid; // assign acutal PID to process object
@@ -218,8 +300,16 @@ int main(void) {
 
             if (num_args < STOP_ARGS) {
                 printf("Usage: stop <PID>\n");
+            } else if (regexec(&pid_re, args[0], 0, NULL, 0) != 0) {
+                printf("Invalid PID\n");
             } else {
-                
+                pid_t pid = strtol(args[0], NULL, 10);
+                if (send_signal_to_process(pid, SIGSTOP) == 0) {
+                    printf("stopping %d\n", pid);
+                    Process *stopped = remove_from_queue(running_queue, pid);
+                    stopped->code = 2;
+                }
+                // send out new running process - dispatch();
             }
         } else if (strcmp(command, KILL_CMD) == 0) {
             char *args[KILL_ARGS + 1];
@@ -227,6 +317,24 @@ int main(void) {
 
             if (num_args < KILL_ARGS) {
                 printf("Usage: kill <PID>\n");
+            } else if (regexec(&pid_re, args[0], 0, NULL, 0) != 0) {
+                printf("Invalid PID\n");
+            } else {
+                pid_t pid = strtol(args[0], NULL, 10);
+                if (send_signal_to_process(pid, SIGKILL) == 0) {
+                    printf("terminating %d\n", pid);
+                    Process *terminated = find_by_pid(all_queue, pid);
+                    terminated->code = 3;
+
+                    if (find_by_pid(running_queue, pid)) {
+                        remove_from_queue(running_queue, pid);
+                        // dispatch();
+                    } else if (find_by_pid(blocked_queue, pid)) {
+                        remove_from_queue(blocked_queue, pid);
+                    } else if (find_by_pid(ready_queue, pid)) {
+                        remove_from_queue(ready_queue, pid);
+                    }
+                }
             }
         } else if (strcmp(command, RESUME_CMD) == 0) {
             char *args[RESUME_ARGS + 1];
@@ -234,6 +342,23 @@ int main(void) {
 
             if (num_args < RESUME_ARGS) {
                 printf("Usage: resume <PID>\n");
+            } else if (regexec(&pid_re, args[0], 0, NULL, 0) != 0) {
+                printf("Invalid PID\n");
+            } else {
+                pid_t pid = strtol(args[0], NULL, 10);
+                Process *resumed = find_by_pid(all_queue, pid);
+                if (resumed) {
+                    if (resumed->code == 2) {
+                        printf("resuming %d\n", pid);
+                        append_to_queue(ready_queue, resumed);
+                        resumed->code = 1;
+                    } else {
+                        printf("Unable to resume a process that is not in the stopped state (code: 2)\n");
+                    }
+                } else {
+                    printf("Invalid PID\n");
+                }
+                // send_signal_to_process(strtol(args[0], NULL, 10), SIGCONT);
             }
         } else if (strcmp(command, LIST_CMD) == 0) {
             print_global_queue(all_queue);
