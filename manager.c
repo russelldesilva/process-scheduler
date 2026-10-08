@@ -146,7 +146,7 @@ Process *remove_from_queue(P_Node_Queue *queue, Process *target) {
     return NULL;
 }
 
-// sends a signal to OS process
+// sends a signal to OS process stored in the all_queue
 // pid: PID of process, signal: SIGSTOP, SIGKILL or SIGCONT
 int send_signal_to_process(pid_t pid, int signal) {
     Process *process = find_by_pid(all_queue, pid);
@@ -168,6 +168,7 @@ int send_signal_to_process(pid_t pid, int signal) {
     }
 
     int status = kill(pid, signal);
+
     if (signal == SIGKILL) {
         waitpid(pid, NULL, 0); // wait for child process to die first before garbage collection
     }
@@ -488,6 +489,13 @@ int main(void) {
         } else if (strcmp(command, LIST_CMD) == 0) {
             print_global_queue(all_queue);
         } else if (strcmp(command, EXIT_CMD) == 0) {
+            Process *curr = all_queue->head;
+            while (curr != NULL) {
+                if (curr->PID > 0 && curr->code != 3) {
+                    send_signal_to_process(curr->PID, SIGKILL);
+                }
+                curr = curr->global_next;
+            }
             break;
         } else if (strcmp(command, EVENT_CMD) == 0) {
             char *args[EVENT_ARGS + 1];
