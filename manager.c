@@ -15,10 +15,9 @@
 typedef struct Process {
     pid_t PID;
     int code;
-    char *file_name;
-    char *n;
+    char **argv; // program path followed by its arguments, NULL-terminated (passed to execv)
     char *priority;
-    // char *event;
+    int arrival; // admission order, used to break priority ties FCFS (smaller = arrived earlier)
     int event_id; // 1..3 or 0 if none
     int event_at; // number of cycles before blocking event occurs
     int ran; // number of cycles already ran
@@ -42,8 +41,8 @@ regex_t priority_re, event_re;
 // regex comparator for PID
 regex_t pid_re;
 
-// path to dummy program
-char *PROGRAM_PATH;
+// arrival number given to the next admitted process
+int next_arrival = 0;
 
 // indicates whether a child is done.
 // 1 = done, 0 = not done
@@ -71,7 +70,6 @@ int extract_args(char* args[], int num_args) {
     char *arg;
 
     while (idx < num_args && (arg = strtok(NULL, " ")) != NULL) {
-        // printf("%s\n", arg);
         args[idx] = arg;
         idx++;
     }
@@ -114,19 +112,6 @@ void append_to_global_queue(P_Node_Queue *queue, Process *process) {
 
     queue->size++;
 }
-
-// // assings a process to either running or ready queue
-// // - will send to running queue only if there are free slots (max 3)
-// // - otherwise send to ready queue
-// void assign_to_queue(Process *process) {
-//     if (running_queue->size < 3) {
-//         process->code = 0;
-//         append_to_queue(running_queue, process);
-//     } else {
-//         process->code = 1;
-//         append_to_queue(ready_queue, process);
-//     }
-// }
 
 // finds a process by its pid, returns that process or NULL if not found
 Process *find_by_pid(P_Node_Queue *queue, pid_t pid) {
@@ -194,25 +179,22 @@ int send_signal_to_process(pid_t pid, int signal) {
     return 0;
 }
 
-// void print_queue(P_Node_Queue *queue) {
-//     Process *curr = queue->head;
-//     printf("%-8s %-6s %s\n", "PID", "STATE", "PRIORITY");
-//     while (curr != NULL) {
-//         printf("%-8d %-6d %s\n", curr->PID, curr->code, curr->priority);
-//         curr = curr->next;
-//     }
-// }
-
 // prints all processes in the all_queue
 void print_global_queue(P_Node_Queue *queue) {
     Process *curr = queue->head;
     printf("%-8s %-6s %s\n", "PID", "STATE", "PRIORITY");
     while (curr != NULL) {
         if (curr->PID != 0) {
-            printf("%-8d %-6d %s\n", curr->PID, curr->code, curr->priority);
+            printf("%-8d %-6d %s", curr->PID, curr->code, curr->priority);
         } else {
-            printf("%-8c %-6d %s\n", '-', curr->code, curr->priority); // print '-' when PID is 0 (i.e. process not started yet)
+            printf("%-8c %-6d %s", '-', curr->code, curr->priority); // print '-' when PID is 0 (i.e. process not started yet)
         }
+
+        // blocked processes also show which event they are waiting for
+        if (curr->code == 4) {
+            printf(" (waiting for E%d)", curr->event_id);
+        }
+        printf("\n");
         curr = curr->global_next;
     }
 }
@@ -230,48 +212,42 @@ int parse_priority(char *priority) {
     return (int)value;
 }
 
-// picks the next process to run from the ready queue, returns selected process of NULL if queue is empty
+// picks the next process to run from the ready queue, returns selected process or NULL if queue is empty
+// - highest priority (smallest number) wins
+// - ties are broken by original arrival time (FCFS), not by position in the ready queue,
+//   so a resumed/unblocked process keeps its place ahead of processes that arrived after it
 Process *pick_next_process() {
-    if (ready_queue->head == NULL) {
-        return NULL;
-    }
-
-    int highest_priority = parse_priority(ready_queue->head->priority);
+    Process *best = NULL;
+    int best_priority = 0;
     Process *curr = ready_queue->head;
 
-    // find highest priority (smallest digit) in the queue
     while (curr != NULL) {
         int curr_priority = parse_priority(curr->priority);
-        if (curr_priority != -1 && curr_priority < highest_priority) {
-            highest_priority = curr_priority;
+        if (best == NULL || curr_priority < best_priority ||
+            (curr_priority == best_priority && curr->arrival < best->arrival)) {
+            best = curr;
+            best_priority = curr_priority;
         }
         curr = curr->next;
     }
 
-    curr = ready_queue->head;
-    // greedy: find first occurrence of highest priority as that will be the process that arrived first
-    while (curr != NULL) {
-        int curr_priority = parse_priority(curr->priority);
-        if (curr_priority != -1 && curr_priority == highest_priority) {
-            return curr;
-        }
-        curr = curr->next;
-    }
-
-    return NULL;
+    return best;
 }
 
-// start executing a new process
-void start_process(Process *process) {
-    pid_t pid = fork(); 
-    if (pid == 0) {
-        char *prog_args[] = {PROGRAM_PATH, process->file_name, process->n, NULL};
-        execv(PROGRAM_PATH, prog_args);
+// start executing a new process, returns 0 on success or -1 if fork failed
+int start_process(Process *process) {
+    pid_t pid = fork();
+    if (pid == -1) {
+        perror("Unable to create process");
+        return -1;
+    } else if (pid == 0) {
+        execv(process->argv[0], process->argv);
         perror("Unable to execute program");    // only reached if exec failed
         _exit(1);
-    } else {
-        process->PID = pid; // assign acutal PID to process object
     }
+
+    process->PID = pid; // assign actual PID to process object
+    return 0;
 }
 
 // start/resume a chosen process from the ready queue.
@@ -284,11 +260,20 @@ void dispatch() {
 
         remove_from_queue(ready_queue, chosen_one);
 
+        int status;
         if (chosen_one->PID == 0) { // PID = 0 implies a new process
-            start_process(chosen_one);
-        } else { // else it is a process returning from stop
-            chosen_one->code = 2;
-            send_signal_to_process(chosen_one->PID, SIGCONT);
+            status = start_process(chosen_one);
+        } else { // else it is a process returning from stop or blocked, so just continue it
+            status = kill(chosen_one->PID, SIGCONT);
+            if (status == -1) {
+                perror("Unable to resume process");
+            }
+        }
+
+        // only occupy a running slot if the process actually started/continued
+        if (status == -1) {
+            chosen_one->code = 3;
+            continue;
         }
 
         append_to_queue(running_queue, chosen_one);
@@ -310,7 +295,24 @@ void handle_dead_children() {
             continue;
         }
         p->code = 3;
+
+        // a child can die while not running (e.g. exits just as it is blocked, or is killed
+        // externally while stopped), so remove it from every state queue, not just running
         remove_from_queue(running_queue, p);
+        remove_from_queue(ready_queue, p);
+        remove_from_queue(blocked_queue, p);
+    }
+}
+
+// kills every child that has not terminated yet, used by exit and on end of input (Ctrl + D)
+void terminate_all() {
+    Process *curr = all_queue->head;
+    while (curr != NULL) {
+        if (curr->PID > 0 && curr->code != 3) {
+            kill(curr->PID, SIGKILL);
+            curr->code = 3;
+        }
+        curr = curr->global_next;
     }
 }
 
@@ -344,9 +346,6 @@ void handle_cycles() {
 }
 
 int main(void) {
-    // program path
-    PROGRAM_PATH = "./out/prog";
-
     // names of commands
     const char RUN_CMD[4] = "run";
     const char STOP_CMD[5] = "stop";
@@ -357,8 +356,8 @@ int main(void) {
     const char EVENT_CMD[6] = "event";
     
     // number of args for each command
-    const int RUN_ARGS = 5;
-    const int RUN_ARGS_MANDATORY = 4;
+    const int RUN_ARGS = 32; // max tokens after "run": program, its arguments, priority, event
+    const int RUN_ARGS_MANDATORY = 2; // program and priority
     const int STOP_ARGS = 1;
     const int RESUME_ARGS = 1;
     const int KILL_ARGS = 1;
@@ -404,7 +403,7 @@ int main(void) {
     // buffer for command input
     char line[256];
     
-    // gate for the prompt: only print it when the previous one has been consumed by a
+    // gate for the prompt ($cs205): only print it when the previous one has been consumed by a
     // completed line. If fgets is interrupted by SIGCHLD, the prompt (and whatever the
     // user has typed so far) is still on screen, so we must not print it again.
     bool show_prompt = true;
@@ -420,15 +419,20 @@ int main(void) {
             show_prompt = false;
         }
 
+        // reset errno first, otherwise a EINTR signal makes a real
+        // end of input (Ctrl + D / end of piped script) look like an interruption and loop forever
+        errno = 0;
         if (fgets(line, sizeof line, stdin) == NULL) {
             if (errno == EINTR) {
                 clearerr(stdin);
                 continue;   // interrupted: keep waiting without reprinting the prompt
             }
+            terminate_all(); // end of input - terminate all children remaining
             break;
         }
 
-        show_prompt = true; // a full line was read, so the next iteration needs a fresh prompt
+        // only show cs205$ if an actual user input was entered (not an interrupt)
+        show_prompt = true;
 
         // replace \n with \0 so strtok knows the end of the line
         line[strcspn(line, "\n")] = '\0';
@@ -442,35 +446,51 @@ int main(void) {
         if (strcmp(command, RUN_CMD) == 0) {
             char *args[RUN_ARGS + 1];
             int num_args = extract_args(args, RUN_ARGS);
-            // args[0] = "prog"
-            // args[1] = <file_name>
-            // args[2] = <n>
-            // args[3] = <priority>
-            // args[4] = <event>
-            // args[5] = NULL
+            // layout: args[0] = <program>, args[1..] = <program arguments>,
+            //         then <priority>, then optionally <event@cycle> as the last token
+            // e.g. run ./prog x60 60 P4 E1@40
+
+            // the event is optional, so work out from the last token where the priority is.
+            // a last token containing '@' is treated as an event (validated below)
+            char *event = NULL;
+            int priority_idx = num_args - 1;
+            if (num_args > RUN_ARGS_MANDATORY && strchr(args[num_args - 1], '@') != NULL) {
+                event = args[num_args - 1];
+                priority_idx = num_args - 2;
+            }
 
             if (num_args < RUN_ARGS_MANDATORY) {
-                printf("Usage: run prog <file_name> <n> <priority> [event (optional)]\n");
-            } else if (strcmp(args[0], "prog") != 0) {
-                printf("Invalid program. Use prog\n");
-            } else if (regexec(&priority_re, args[3], 0, NULL, 0) != 0) {
-                printf("Invalid priority. Priority must be in the form P1, P2, P3, ... Pn\n");
-            } else if (num_args == 5 && regexec(&event_re, args[4], 0, NULL, 0) != 0) {
-                printf("Invalid event. Event must be in the form E1/E2/E3@<time_till_event_start>\n");
+                printf("Usage: run <program> [arguments] <priority> [event@cycle (optional)]\n");
+            } else if (num_args == RUN_ARGS && strtok(NULL, " ") != NULL) {
+                printf("Too many arguments. At most %d are allowed after run\n", RUN_ARGS);
+            } else if (regexec(&priority_re, args[priority_idx], 0, NULL, 0) != 0) {
+                printf("Invalid priority. Priority must be in the form P1, P2, P3, ... Pn and come after the program arguments\n");
+            } else if (priority_idx == 0) {
+                printf("Missing program. Usage: run <program> [arguments] <priority> [event@cycle (optional)]\n");
+            } else if (event != NULL && regexec(&event_re, event, 0, NULL, 0) != 0) {
+                printf("Invalid event. Event must be in the form E1/E2/E3@<num_cycles_till_event>\n");
             }
             else {
                 Process *new_process = malloc(sizeof(Process));
                 new_process->PID = 0;
                 new_process->code = 1;
-                new_process->file_name = strdup(args[1]);
-                new_process->n = strdup(args[2]);
-                new_process->priority = strdup(args[3]);
+                new_process->priority = strdup(args[priority_idx]);
+                new_process->arrival = next_arrival++;
                 new_process->ran = 0;
 
+                // copy program path + arguments (everything before the priority) into a NULL-terminated argv for execv.
+                // priority_idx: it is equivalent to the number of args in the program portion + the program path
+                // +1 because of the NULL terminator at the end (for execv)
+                new_process->argv = malloc((priority_idx + 1) * sizeof(char *));
+                for (int i = 0; i < priority_idx; i++) {
+                    new_process->argv[i] = strdup(args[i]);
+                }
+                new_process->argv[priority_idx] = NULL;
+
                 // handle optional event arg
-                if (num_args == 5) {
+                if (event != NULL) {
                     int event_id, event_at;
-                    sscanf(args[4], "E%d@%d", &event_id, &event_at);
+                    sscanf(event, "E%d@%d", &event_id, &event_at);
 
                     new_process->event_id = event_id;
                     new_process->event_at = event_at;
@@ -547,13 +567,7 @@ int main(void) {
         } else if (strcmp(command, LIST_CMD) == 0) {
             print_global_queue(all_queue);
         } else if (strcmp(command, EXIT_CMD) == 0) {
-            Process *curr = all_queue->head;
-            while (curr != NULL) {
-                if (curr->PID > 0 && curr->code != 3) {
-                    send_signal_to_process(curr->PID, SIGKILL);
-                }
-                curr = curr->global_next;
-            }
+            terminate_all();
             break;
         } else if (strcmp(command, EVENT_CMD) == 0) {
             char *args[EVENT_ARGS + 1];
@@ -565,7 +579,11 @@ int main(void) {
                 printf("Invalid event. Event must be E1, E2 or E3\n");
             } else {
                 int event_id = args[0][1] - '0';
+                int unblocked = 0;
 
+                printf("Event E%d received.\n", event_id);
+
+                // blocked_queue is in the order processes blocked, so walking from the head unblocks FCFS
                 Process *curr = blocked_queue->head;
 
                 while (curr != NULL) {
@@ -579,10 +597,14 @@ int main(void) {
                         curr->event_id = 0;
                         curr->event_at = 0;
 
-                        printf("Event E%d received.\n", event_id);
                         printf("Process %d unblocked and moved to Ready Queue.\n", curr->PID);
+                        unblocked++;
                     }
                     curr = next;
+                }
+
+                if (unblocked == 0) {
+                    printf("No processes waiting for E%d.\n", event_id);
                 }
             }
         } else {
