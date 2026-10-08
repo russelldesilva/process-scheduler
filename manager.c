@@ -10,6 +10,7 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <errno.h>
+#include <sys/time.h>
 
 typedef struct Process {
     pid_t PID;
@@ -17,7 +18,10 @@ typedef struct Process {
     char *file_name;
     char *n;
     char *priority;
-    char *event;
+    // char *event;
+    int event_id; // 1..3 or 0 if none
+    int event_at; // number of cycles before blocking event occurs
+    int ran; // number of cycles already ran
     struct Process *next;
     struct Process *global_next;
 } Process;
@@ -45,9 +49,18 @@ char *PROGRAM_PATH;
 // 1 = done, 0 = not done
 volatile sig_atomic_t child_done = 0;
 
+// store the number of cycles that have passed
+// 1 cycle = 1 second
+volatile sig_atomic_t cycles = 0;
+
 // handler for signal when child is done
 void on_sigchld(int sig) {
     child_done = 1;                     
+}
+
+// handler for signal when a cycle has passed
+void on_sigalrm(int sig) {
+    cycles++;
 }
 
 // extracts all arguements into an array of strings
@@ -301,6 +314,35 @@ void handle_dead_children() {
     }
 }
 
+// advances every running process by the cycles that have elapsed since the last call,
+// blocking any process whose event has triggered
+void handle_cycles() {
+    static int last_cycles = 0;
+
+    // the loop also wakes up for SIGCHLD and user input, so only count real elapsed cycles
+    int elapsed = cycles - last_cycles;
+    last_cycles = cycles;
+    if (elapsed <= 0) {
+        return;
+    }
+
+    Process *curr = running_queue->head;
+    while (curr != NULL) {
+        Process *next = curr->next; // save now: moving curr between queues overwrites curr->next
+        curr->ran += elapsed;
+
+        if (curr->event_at > 0 && curr->ran >= curr->event_at) {
+            if (send_signal_to_process(curr->PID, SIGSTOP) == 0) {
+                curr->code = 4;
+                remove_from_queue(running_queue, curr);
+                append_to_queue(blocked_queue, curr);
+            }
+        }
+
+        curr = next;
+    }
+}
+
 int main(void) {
     // program path
     PROGRAM_PATH = "./out/prog";
@@ -346,9 +388,18 @@ int main(void) {
     // register the handler to listen for signals from children
     struct sigaction sa = {0};
     sa.sa_handler = on_sigchld;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_NOCLDSTOP;
+    sigemptyset(&sa.sa_mask); // clear out any garbage bits from memory
+    sa.sa_flags = SA_NOCLDSTOP; // ignores stopped processes, only activate when a process is done or killed
     sigaction(SIGCHLD, &sa, NULL);
+
+    // register the handler that activates when a cycle has passed
+    struct sigaction sa2 = {0};
+    sa2.sa_handler = on_sigalrm;
+    sigemptyset(&sa2.sa_mask); // clear out any garbage bits from memory
+    sigaction(SIGALRM, &sa2, NULL);
+
+    struct itimerval t = { {1,0}, {1,0} }; // {interval of 1s}, {first instance in 1s}
+    setitimer(ITIMER_REAL, &t, NULL); // start the timer, using the above settings. fires SIGALRM each time
     
     // buffer for command input
     char line[256];
@@ -360,6 +411,7 @@ int main(void) {
 
     while (true) {
         handle_dead_children();
+        handle_cycles();
         dispatch();
 
         if (show_prompt) {
@@ -413,12 +465,18 @@ int main(void) {
                 new_process->file_name = strdup(args[1]);
                 new_process->n = strdup(args[2]);
                 new_process->priority = strdup(args[3]);
+                new_process->ran = 0;
 
                 // handle optional event arg
                 if (num_args == 5) {
-                    new_process->event = strdup(args[4]);
+                    int event_id, event_at;
+                    sscanf(args[4], "E%d@%d", &event_id, &event_at);
+
+                    new_process->event_id = event_id;
+                    new_process->event_at = event_at;
                 } else {
-                    new_process->event = NULL;
+                    new_process->event_id = 0;
+                    new_process->event_at = 0;
                 }
 
                 append_to_global_queue(all_queue, new_process);
@@ -503,6 +561,29 @@ int main(void) {
 
             if (num_args < EVENT_ARGS) {
                 printf("Usage: event <E1/E2/E3>\n");
+            } else if (strlen(args[0]) != 2 || args[0][0] != 'E' || args[0][1] < '1' || args[0][1] > '3') {
+                printf("Invalid event. Event must be E1, E2 or E3\n");
+            } else {
+                int event_id = args[0][1] - '0';
+
+                Process *curr = blocked_queue->head;
+
+                while (curr != NULL) {
+                    Process *next = curr->next; // save now: moving curr between queues overwrites curr->next
+                    if (curr->event_id == event_id) {
+                        remove_from_queue(blocked_queue, curr);
+                        append_to_queue(ready_queue, curr);
+                        curr->code = 1;
+
+                        // event has happened, clear it so the process isn't re-blocked next cycle
+                        curr->event_id = 0;
+                        curr->event_at = 0;
+
+                        printf("Event E%d received.\n", event_id);
+                        printf("Process %d unblocked and moved to Ready Queue.\n", curr->PID);
+                    }
+                    curr = next;
+                }
             }
         } else {
             printf("Invalid command\n");
