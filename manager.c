@@ -352,22 +352,30 @@ int main(void) {
     // buffer for command input
     char line[256];
     
+    // gate for the prompt: only print it when the previous one has been consumed by a
+    // completed line. If fgets is interrupted by SIGCHLD, the prompt (and whatever the
+    // user has typed so far) is still on screen, so we must not print it again.
+    bool show_prompt = true;
+
     while (true) {
         handle_dead_children();
         dispatch();
 
-        printf("cs205$ ");
-        fflush(stdout);
+        if (show_prompt) {
+            printf("cs205$ ");
+            fflush(stdout);
+            show_prompt = false;
+        }
 
-        // handle blank inputs
         if (fgets(line, sizeof line, stdin) == NULL) {
             if (errno == EINTR) {
                 clearerr(stdin);
-                printf("\n");
-                continue;
+                continue;   // interrupted: keep waiting without reprinting the prompt
             }
             break;
         }
+
+        show_prompt = true; // a full line was read, so the next iteration needs a fresh prompt
 
         // replace \n with \0 so strtok knows the end of the line
         line[strcspn(line, "\n")] = '\0';
