@@ -7,10 +7,12 @@ Simulated process scheduling system for my CS205 Operating Systems project. It r
 
 ## Highlights
 - Interactive shell (`cs205$`) to run, stop, resume, kill and list background processes
-- Priority scheduling (P1 is highest), with FCFS to break ties
+- Runs any program with any arguments, not just the bundled test program
+- Priority scheduling (P1 is highest), with FCFS by original arrival order to break ties (so a resumed or unblocked job keeps its place ahead of later arrivals)
 - Non-preemptive, so a running job is never kicked out by a higher priority arrival
 - Simulated events that block a process mid-run until the user triggers them
-- All queues (ready, running, blocked) are linked lists, no arrays
+- A finished job's slot is refilled immediately (via `SIGCHLD`), and running time is counted in 1 second cycles (via `SIGALRM`)
+- All queues (ready, running, blocked, plus a list of every process) are linked lists, no arrays
 
 ## Process States
 | Code | State | Description |
@@ -24,14 +26,16 @@ Simulated process scheduling system for my CS205 Operating Systems project. It r
 > `prog` is the test program. It takes a `file_name` and a number `n`, and writes to the file every second for `n` seconds.
 
 ## Commands
-- `run [program] [file_name] [n] [priority] [event@cycle]`: Start a program with a priority (e.g. `P2`). Optionally add an event like `E1@4` to block it after 4 seconds of running until `E1` is triggered
-    - `[file_name]` and `[n]` are the params for the test program (See above).
+- `run <program> [args...] <priority> [event@cycle]`: Start a program with a priority (e.g. `P2`). Optionally add an event like `E1@4` to block it after 4 seconds of running until `E1` is triggered
+    - `<program>` is a path to the executable (e.g. `./out/prog`, `/bin/sleep`). It is run with `execv`, so `PATH` is not searched.
+    - `[args...]` are passed straight to the program, e.g. `x40 40` for the test program (see above).
+    - The priority must come after the program's arguments, and the event (if any) must be last.
 - `stop [PID]`: Suspend a running process and dispatch the next highest priority ready job
 - `resume [PID]`: Move a stopped process back to ready. It doesn't preempt anything, just waits for a free slot
 - `kill [PID]`: Terminate a process and dispatch the next ready job if a slot frees up
 - `event [E1/E2/E3]`: Trigger an event and move any processes waiting on it back to ready (FCFS if there's more than one)
-- `list`: Show PID, state and priority of every process
-- `exit`: Kill any remaining child processes and quit
+- `list`: Show PID, state and priority of every process (`-` as the PID if it hasn't started yet, and which event a blocked process is waiting for)
+- `exit`: Kill any remaining child processes and quit. End of input (Ctrl + D) does the same
 
 ## Predefined events
 These are meant to simulate I/O or other blocking events that occur in the course of real-life execution of processes. These are triggered using `event [E1/E2/E3]`.
@@ -45,22 +49,28 @@ These are meant to simulate I/O or other blocking events that occur in the cours
 ## How to run
 Needs a Linux/Unix environment (WSL works fine).
 ```sh
+mkdir -p out
 gcc -o manager manager.c
-gcc -o out/prog tools/prog.c
+gcc -o out/prog tools/prog.c  #optional
 ./manager
 ```
 
 ## Example
 ```
-cs205$ run ./prog x40 40 P3
-cs205$ run ./prog x50 50 P1
-cs205$ run ./prog x60 60 P4 E1@40
-cs205$ run ./prog x70 70 P2
+cs205$ run ./out/prog x40 40 P3
+cs205$ run ./out/prog x50 50 P1
+cs205$ run ./out/prog x60 60 P4 E1@40
+cs205$ run ./out/prog x70 70 P2
 cs205$ list
-PID     STATE   PRIORITY
-11001   0       P3
-11002   0       P1
-11003   0       P4
--       1       P2
+PID      STATE  PRIORITY
+11001    0      P3
+11002    0      P1
+11003    0      P4
+-        1      P2
 ```
-Only three can run at once, so P2 waits in the ready queue even though it's higher priority than P3 and P4. Once P3 finishes, P2 gets the free slot. When P4 hits 40 seconds it blocks on `E1` until you run `event E1`.
+Only three can run at once, so P2 waits in the ready queue even though it's higher priority than P3 and P4. Once P3 finishes, P2 gets the free slot. When P4 hits 40 seconds it blocks on `E1` (shown in `list` as `4 P4 (waiting for E1)`) until you run `event E1`:
+```
+cs205$ event E1
+Event E1 received.
+Process 11003 unblocked and moved to Ready Queue.
+```
